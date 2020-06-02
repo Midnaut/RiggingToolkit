@@ -6,46 +6,151 @@ import sys
 # manage and reload imports
 import acid_LocatorUtils as LocUtils
 import acid_BaseClassDefs as BaseClassDefs
+import acid_MathUtils as MathUtils
+import acid_ShapeUtils as ShapeUtils
+
 
 LocUtils = reload(LocUtils)
 BaseClassDefs = reload(BaseClassDefs)
 
 class LegModule(BaseClassDefs.ModuleBase):
 
+    #seems like a good candidate to load in from a settings JSON
+    JNT_NAMES = ["hip", "knee", "ankle", "ball", "toe"]
+
     def __init__(self):
         return
 
-    def CreateChainFromLocators(self,HipLoc, KneeLoc, AnkleLoc, BallLoc, ToeLoc,JointPrefix, JointRadius):
+    def CreateChainFromLocators(self, LocList, Prefix, JointRadius, FlipKneeY):
         # create joints
-        self.GenBaseChain(HipLoc, KneeLoc, AnkleLoc, BallLoc, ToeLoc,JointPrefix, JointRadius)
+        self.GenJoints(LocList, Prefix, JointRadius)
+        self.OrientChain(Prefix, "_JNT", FlipKneeY)
+        self.CreateIK()
+        self.CreatePVControl(Prefix, "PV_CTL", JointRadius)
 
-    def GenBaseChain(self, HipLoc, KneeLoc, AnkleLoc, BallLoc, ToeLoc, JointPrefix, JointRadius):
-        # create the bind of the module
-        jntNames = ["hip", "knee", "ankle", "ball", "toe"]
-        locNames = [HipLoc, KneeLoc, AnkleLoc, BallLoc, ToeLoc]
-
+    def GenJoints(self, LocList, Prefix, JointRadius, Suffix = "_JNT"):
         cmds.select(clear=True)
 
         # loop and assign names
-        for i, loc in enumerate(locNames):
+        for i, loc in enumerate(LocList):
             pos = cmds.xform(loc, query=True, translation=True, worldSpace=True)
-            j = cmds.joint(radius=JointRadius, position=pos,name=JointPrefix + jntNames[i] + "_JNT",absolute=True)
-
-        # clear the parent back to scene root
+            #clear selection to allow for creating floating joints which we then parent as needed
+            cmds.select(clear=True)
+            j = cmds.joint(radius=JointRadius, position=pos,name=Prefix + self.JNT_NAMES[i] + Suffix ,absolute=True)
 
         # check if child of scene already
-        cmds.select(JointPrefix + jntNames[0] + "_JNT")
+        cmds.select(Prefix + self.JNT_NAMES[0] + Suffix)
         isChildOfScene = cmds.listRelatives(parent=True) is None
 
         # if not a child of scene, parent to scene root
         if not isChildOfScene:
-            cmds.parent(JointPrefix + jntNames[0] + "_JNT", world=True, absolute=True)
+            cmds.parent(Prefix + self.JNT_NAMES[0] + Suffix , world=True, absolute=True)
 
-        # orient the joint chain
-        # the results are so bad its better to just use comet orient
-        # or to simplify their method(destroy then recombine)
-        # cmds.joint(edit = True, children= True, orientJoint = 'xyz')+
         return
+
+    def OrientChain(self, prefix, suffix, flipKneeY):
+
+        #variables
+        aimVector = [1,0,0]
+        
+        upVector = []
+        if flipKneeY:
+            upVector = [0,0,1]
+        else:
+            upVector = [0,0,-1]
+
+        #wordy but extendable
+        self.hipJnt = prefix + self.JNT_NAMES[0] + suffix
+        self.kneeJnt = prefix + self.JNT_NAMES[1] + suffix
+        self.ankleJnt = prefix + self.JNT_NAMES[2] + suffix
+        self.ballJnt = prefix + self.JNT_NAMES[3] + suffix
+        self.toeJnt = prefix + self.JNT_NAMES[4] + suffix
+
+        #aimConstraint -offset 0 0 0 -weight 1 -aimVector 1 0 0 -upVector 0 0 -1 -worldUpType "object" -worldUpObject L_ankle_JNT;
+        #aim hip to kneee
+        aimCon = cmds.aimConstraint( self.kneeJnt, self.hipJnt, aim = aimVector,u = upVector ,wut = "object" ,wuo = self.ankleJnt)
+        cmds.delete(aimCon)
+        aimCon = cmds.aimConstraint( self.ankleJnt, self.kneeJnt, aim = aimVector,u = upVector ,wut = "object" ,wuo = self.hipJnt)
+        cmds.delete(aimCon)
+
+        cmds.parent(self.kneeJnt, self.kneeJnt)
+
+        #construct the ankle ball toe joint chain
+        cmds.parent(self.toeJnt, self.ballJnt)
+        cmds.parent(self.ballJnt, self.ankleJnt)
+
+        #orient ankle chain to x front
+        cmds.joint( self.ankleJnt , e=True, zso=True, oj='xyz', sao='xup', ch=True)
+        #orient to to world
+        cmds.joint( self.toeJnt , e=True, zso=True, oj='none')
+        cmds.parent(self.ankleJnt, self.kneeJnt)
+
+        #cleanup freeze transformations
+        cmds.select(self.hipJnt)
+        cmds.makeIdentity(apply=True, t=1, r=1, s=1, n=0)
+        cmds.select(clear = True)
+
+    def CreateIK(self):
+        self.IKHandle = cmds.ikHandle( n='L_leg_IKH', sj=self.hipJnt, ee=self.ankleJnt, sol = "ikRPsolver")[0]
+
+
+    def CreatePVControl(self, Prefix, Suffix, ControlSize):
+        #create polygon at hip knee ankle
+        #set pivot to average of hip ankle
+        hipPos = cmds.xform(self.hipJnt,q=1,ws=1,rp=1)
+        kneePos = cmds.xform(self.kneeJnt,q=1,ws=1,rp=1)
+        anklePos = cmds.xform(self.ankleJnt,q=1,ws=1,rp=1)
+        halfwayPos = MathUtils.AverageVector3([hipPos, anklePos])
+
+        point_list = [hipPos, kneePos, anklePos, halfwayPos]
+
+        legPVCurve = cmds.curve(degree = 1, point = point_list)
+
+        #adjust the pivot so that it gives us a nice approximation of the knee 
+        cmds.move(halfwayPos[0], halfwayPos[1], halfwayPos[2], legPVCurve+".scalePivot", legPVCurve+".rotatePivot", absolute=True)
+
+        #scale the curve to project our knee pv point forward
+        cmds.select(legPVCurve)
+        cmds.scale( 2, 2, 2 )
+
+        #get position of knee from curve (hip = 0, knee = 1, ankle = 2)
+        controlPos = cmds.pointPosition( legPVCurve+'.cv[1]')
+        controlPoint = (controlPos[0], controlPos[1], controlPos[2])
+        #create diamond shape at pos
+        #name with assigned prefix and suffix, size will match joint radius as a base
+        control = cmds.curve(name=Prefix + self.JNT_NAMES[1] + Suffix, degree = 1, point= ShapeUtils.diamondControlPath())
+        cmds.select(control)
+        cmds.move(controlPos[0], controlPos[1],controlPos[2])
+        cmds.scale( ControlSize, ControlSize, ControlSize )
+        cmds.makeIdentity(apply=True, t=1, r=1, s=1, n=0)
+
+        #create null annotation at diamond pointing to child locator
+        cmds.select(clear = True)
+        locator = cmds.spaceLocator( n = Prefix + self.JNT_NAMES[1] + "PVGuide_LOC")[0]
+        group = cmds.group( em=True, name=Prefix + self.JNT_NAMES[1] + "PVOffset_GRP")
+        annotation = cmds.annotate( locator, tx='')
+        anno_transfrom = cmds.listRelatives( annotation, allParents=True )[0]
+        anno_transfrom = cmds.rename(anno_transfrom, Prefix + self.JNT_NAMES[1] + "PVGuide_ANT")
+        annotation = cmds.listRelatives(anno_transfrom)[0]
+
+        #point constrain the annotation to the knee
+        cmds.pointConstraint( self.kneeJnt, anno_transfrom)
+        #move locator to position and parent
+        cmds.parent(locator, control)
+        cmds.move( controlPos[0], controlPos[1],controlPos[2], locator, absolute=True )
+        cmds.parent(anno_transfrom, locator)
+        
+        cmds.move( controlPos[0], controlPos[1],controlPos[2], group, absolute=True )
+        cmds.parent(control, group)
+
+        #pole vector the ikh and the diamond
+        cmds.poleVectorConstraint( control, self.IKHandle )
+
+        #cleanup
+        cmds.delete(legPVCurve)
+        cmds.select(annotation)
+        cmds.toggle(template= True)
+
 
 
 class CreateLegFromLocatorsUI():
@@ -61,20 +166,18 @@ class CreateLegFromLocatorsUI():
 
     
     def CreateModule(self, *args):
-        textField_HipLoc = cmds.textField('HipLoctFld', query=True, text=True)
-        textField_KneeLoc = cmds.textField('KneeLoctFld', query=True, text=True)
-        textField_AnkleLoc = cmds.textField('AnkleLoctFld', query=True, text=True)
-        textField_BallLoc = cmds.textField('BallLoctFld', query=True, text=True)
-        textField_ToeLoc = cmds.textField('ToeLoctFld', query=True, text=True)
+        locList = []
+        locList.append(cmds.textField('HipLoctFld', query=True, text=True))
+        locList.append(cmds.textField('KneeLoctFld', query=True, text=True))
+        locList.append(cmds.textField('AnkleLoctFld', query=True, text=True))
+        locList.append(cmds.textField('BallLoctFld', query=True, text=True))
+        locList.append(cmds.textField('ToeLoctFld', query=True, text=True))
+
         textField_JointPrefix = cmds.textField('JointPfxtFld', query=True, text=True)
         floatField_JointRad = cmds.floatField('JointRadfFld', query=True, value=True)
-        LegModule().CreateChainFromLocators(textField_HipLoc,
-                                            textField_KneeLoc,
-                                            textField_AnkleLoc,
-                                            textField_BallLoc,
-                                            textField_ToeLoc,
-                                            textField_JointPrefix,
-                                            floatField_JointRad)
+
+        checkBox_flipY = cmds.checkBox('FlipYChckBx' , query=True, value=True)
+        LegModule().CreateChainFromLocators(locList,textField_JointPrefix,floatField_JointRad, checkBox_flipY)
 
     def GenerateUI(self):
 
@@ -140,7 +243,7 @@ class CreateLegFromLocatorsUI():
         cmds.separator(height=25, style='out')
 
         # row colum for the extra settings
-        cmds.rowColumnLayout(numberOfColumns=4, columnWidth=[(1, 80), (2, 100), (3, 80), (4, 100)])
+        cmds.rowColumnLayout(numberOfColumns=5, columnWidth=[(1, 80), (2, 60), (3, 80), (4, 60), (5,80)])
 
         cmds.text(label="Name Prefix")
         self.JointPrefixTextFld = cmds.textField('JointPfxtFld', h=50, w=50)
@@ -148,11 +251,13 @@ class CreateLegFromLocatorsUI():
         cmds.text(label="Joint Radius")
         self.JointRadiusFloatFld = cmds.floatField('JointRadfFld', minValue=0.01, value=.2, precision=2)
 
+        self.FlipYDirCheckBox = cmds.checkBox('FlipYChckBx', label='Flip Knee Y', align='center' )
+
         # escape the settings layout
         cmds.setParent('..')
         cmds.separator(height=25, style='out')
         
-        cmds.text(label="Warning! Make sure you handle the orients!")
+        cmds.text(label="Warning! Make sure you double check the hip/knee orients!")
         
         cmds.separator(height=25, style='out')
         self.GenerateButton = cmds.button(l='Generate', c=self.CreateModule, h=50, width=200)
@@ -163,5 +268,3 @@ class CreateLegFromLocatorsUI():
         # Display the window
         cmds.showWindow(self.win)
                 
-
-CreateLegFromLocatorsUI().GenerateUI()
