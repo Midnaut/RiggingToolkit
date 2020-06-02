@@ -21,12 +21,17 @@ class LegModule(BaseClassDefs.ModuleBase):
     def __init__(self):
         return
 
-    def CreateChainFromLocators(self, LocList, Prefix, JointRadius, PVPush, FlipKneeY):
+    def CreateLegAndFoot(self, LocList, Prefix, JointRadius, PVPush, FlipKneeY):
         # create joints
         self.GenJoints(LocList, Prefix, JointRadius)
         self.OrientChain(Prefix, "_JNT", FlipKneeY)
         self.CreateIK()
         self.CreatePVControl(Prefix, "PV_CTL", PVPush, JointRadius)
+        self.CreateRevFootJoints();
+        self.OrientAndMatchFootJoints();
+
+    def CompleteFootAndNoFlip(self):
+        pass
 
     def GenJoints(self, LocList, Prefix, JointRadius, Suffix = "_JNT"):
         cmds.select(clear=True)
@@ -107,7 +112,6 @@ class LegModule(BaseClassDefs.ModuleBase):
         legPVCurve = cmds.curve(degree = 1, point = point_list)
         kneePivotCurve = cmds.curve(degree = 1, point = point_list_2)
 
-
         #create node
         nearestPOCNode = cmds.createNode("nearestPointOnCurve")
         cmds.connectAttr(kneePivotCurve+".worldSpace", nearestPOCNode + ".inputCurve")
@@ -115,7 +119,6 @@ class LegModule(BaseClassDefs.ModuleBase):
 
         halfwayPos = cmds.getAttr(nearestPOCNode + ".position")[0]
 
-        print(halfwayPos)
         #adjust the pivot so that it gives us a nice approximation of the knee 
         cmds.move(halfwayPos[0], halfwayPos[1], halfwayPos[2], legPVCurve+".scalePivot", legPVCurve+".rotatePivot", absolute=True)
 
@@ -160,12 +163,42 @@ class LegModule(BaseClassDefs.ModuleBase):
         cmds.delete(nearestPOCNode)
         cmds.delete(legPVCurve)
         cmds.delete(kneePivotCurve)
-        cmds.select(annotation)
         cmds.setAttr(locator + ".localScaleX", 0)
         cmds.setAttr(locator + ".localScaleY", 0)
         cmds.setAttr(locator + ".localScaleZ", 0)
-
+        cmds.select(annotation)
         cmds.toggle(template= True)
+
+    def CreateRevFootJoints(self):
+        #create the roll diamond setup
+        cmds.select(clear = True)
+        self.revCBankJnt = cmds.joint(name = "L_revCenterBank", p = [-4, 0, 0])
+        self.revEBankJnt =cmds.joint(name = "L_edgeBank", p = [4, 0, 0])
+        self.revPivotJnt =cmds.joint(name = "L_pivot", p = [0, 0, 0])
+        self.revHeelJnt =cmds.joint(name = "L_heel", p = [0, 0, -8])
+        self.revToeJnt =cmds.joint(name = "L_toe", p = [0, 0, 6])
+        self.revBallJnt =cmds.joint(name = "L_ball", p = [0, 0, 3])
+        self.revAnkleJnt =cmds.joint(name = "L_anke", p = [0, 0, -3])
+        cmds.select(clear = True)
+
+    def OrientAndMatchFootJoints(self):
+        #do the funky orient to match the ball orient
+        #joint -e  -oj yxz -secondaryAxisOrient zup -ch -zso;
+        cmds.joint(self.revCBankJnt, e = True, oj = 'yxz', sao = 'zup', ch = True, zso = True)
+        orientConstraint = cmds.orientConstraint(self.ballJnt, self.revCBankJnt)
+        cmds.delete(orientConstraint)
+
+        #make identity to clear rotations of the joints
+        cmds.select(self.revCBankJnt)
+        cmds.makeIdentity(apply=True, t=1, r=1, s=1, n=0)
+        cmds.parent(self.revCBankJnt, self.ballJnt)
+
+        #orient to to world
+        cmds.joint( self.revCBankJnt , e=True, zso=True, oj='none', ch= True)
+        cmds.xform(self.revCBankJnt ,translation = [0,0,0], worldSpace = False)
+
+        cmds.parent(world = True)
+        cmds.select(clear = True)
 
 
 
@@ -181,7 +214,7 @@ class CreateLegFromLocatorsUI():
         add = cmds.textField(args[2], edit=True, text=loc)
 
     
-    def CreateModule(self, *args):
+    def StartModule(self, *args):
         locList = []
         locList.append(cmds.textField('HipLoctFld', query=True, text=True))
         locList.append(cmds.textField('KneeLoctFld', query=True, text=True))
@@ -194,7 +227,10 @@ class CreateLegFromLocatorsUI():
         floatField_PVPush = cmds.floatField('PVPushfFld', query=True, value=True)
 
         checkBox_flipY = cmds.checkBox('FlipYChckBx' , query=True, value=True)
-        LegModule().CreateChainFromLocators(locList,textField_JointPrefix,floatField_JointRad,floatField_PVPush,checkBox_flipY)
+        LegModule().CreateLegAndFoot(locList,textField_JointPrefix,floatField_JointRad,floatField_PVPush,checkBox_flipY)
+
+    def FinishModule(self, *args):
+        LegModule().CompleteFootAndNoFlip()
 
     def GenerateUI(self):
 
@@ -270,7 +306,7 @@ class CreateLegFromLocatorsUI():
         
         cmds.text(label="PV Push")
         self.PVPushFloatFld = cmds.floatField('PVPushfFld', value=5, precision=2)
-        
+
         cmds.text(label="Flip Hip/Knee Y")
         self.FlipYDirCheckBox = cmds.checkBox('FlipYChckBx', label= "",  align='center' )
 
@@ -281,8 +317,14 @@ class CreateLegFromLocatorsUI():
         cmds.text(label="Warning! Make sure you double check the hip/knee orients!")
         
         cmds.separator(height=25, style='out')
-        self.GenerateButton = cmds.button(l='Generate', c=self.CreateModule, h=50, width=200)
-
+        self.GenerateButton = cmds.button(l='Generate Leg + Foot Control Bones', c=self.StartModule, h=50, width=200)
+        
+        cmds.separator(height=25, style='out')
+        
+        cmds.text(label="Warning! Make sure you have placed the Reverse Foot joints!")
+        
+        cmds.separator(height=25, style='out')
+        self.FinishButton = cmds.button(l='Complete foot control + No flip Leg', c=self.FinishModule, h=50, width=200)
         # Display the window
         cmds.showWindow(self.win)
                 
