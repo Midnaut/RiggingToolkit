@@ -21,12 +21,12 @@ class LegModule(BaseClassDefs.ModuleBase):
     def __init__(self):
         return
 
-    def CreateChainFromLocators(self, LocList, Prefix, JointRadius, FlipKneeY):
+    def CreateChainFromLocators(self, LocList, Prefix, JointRadius, PVPush, FlipKneeY):
         # create joints
         self.GenJoints(LocList, Prefix, JointRadius)
         self.OrientChain(Prefix, "_JNT", FlipKneeY)
         self.CreateIK()
-        self.CreatePVControl(Prefix, "PV_CTL", JointRadius)
+        self.CreatePVControl(Prefix, "PV_CTL", PVPush, JointRadius)
 
     def GenJoints(self, LocList, Prefix, JointRadius, Suffix = "_JNT"):
         cmds.select(clear=True)
@@ -94,24 +94,34 @@ class LegModule(BaseClassDefs.ModuleBase):
         self.IKHandle = cmds.ikHandle( n='L_leg_IKH', sj=self.hipJnt, ee=self.ankleJnt, sol = "ikRPsolver")[0]
 
 
-    def CreatePVControl(self, Prefix, Suffix, ControlSize):
+    def CreatePVControl(self, Prefix, Suffix, PVPush, ControlSize):
         #create polygon at hip knee ankle
         #set pivot to average of hip ankle
         hipPos = cmds.xform(self.hipJnt,q=1,ws=1,rp=1)
         kneePos = cmds.xform(self.kneeJnt,q=1,ws=1,rp=1)
         anklePos = cmds.xform(self.ankleJnt,q=1,ws=1,rp=1)
-        halfwayPos = MathUtils.AverageVector3([hipPos, anklePos])
 
-        point_list = [hipPos, kneePos, anklePos, halfwayPos]
+        point_list = [hipPos, kneePos, anklePos]
+        point_list_2 = [hipPos, anklePos]
 
         legPVCurve = cmds.curve(degree = 1, point = point_list)
+        kneePivotCurve = cmds.curve(degree = 1, point = point_list_2)
 
+
+        #create node
+        nearestPOCNode = cmds.createNode("nearestPointOnCurve")
+        cmds.connectAttr(kneePivotCurve+".worldSpace", nearestPOCNode + ".inputCurve")
+        cmds.setAttr(nearestPOCNode+".inPosition", kneePos[0], kneePos[1], kneePos[2], type="double3") 
+
+        halfwayPos = cmds.getAttr(nearestPOCNode + ".position")[0]
+
+        print(halfwayPos)
         #adjust the pivot so that it gives us a nice approximation of the knee 
         cmds.move(halfwayPos[0], halfwayPos[1], halfwayPos[2], legPVCurve+".scalePivot", legPVCurve+".rotatePivot", absolute=True)
 
         #scale the curve to project our knee pv point forward
         cmds.select(legPVCurve)
-        cmds.scale( 2, 2, 2 )
+        cmds.scale(PVPush, PVPush, PVPush)
 
         #get position of knee from curve (hip = 0, knee = 1, ankle = 2)
         controlPos = cmds.pointPosition( legPVCurve+'.cv[1]')
@@ -147,8 +157,14 @@ class LegModule(BaseClassDefs.ModuleBase):
         cmds.poleVectorConstraint( control, self.IKHandle )
 
         #cleanup
+        cmds.delete(nearestPOCNode)
         cmds.delete(legPVCurve)
+        cmds.delete(kneePivotCurve)
         cmds.select(annotation)
+        cmds.setAttr(locator + ".localScaleX", 0)
+        cmds.setAttr(locator + ".localScaleY", 0)
+        cmds.setAttr(locator + ".localScaleZ", 0)
+
         cmds.toggle(template= True)
 
 
@@ -175,9 +191,10 @@ class CreateLegFromLocatorsUI():
 
         textField_JointPrefix = cmds.textField('JointPfxtFld', query=True, text=True)
         floatField_JointRad = cmds.floatField('JointRadfFld', query=True, value=True)
+        floatField_PVPush = cmds.floatField('PVPushfFld', query=True, value=True)
 
         checkBox_flipY = cmds.checkBox('FlipYChckBx' , query=True, value=True)
-        LegModule().CreateChainFromLocators(locList,textField_JointPrefix,floatField_JointRad, checkBox_flipY)
+        LegModule().CreateChainFromLocators(locList,textField_JointPrefix,floatField_JointRad,floatField_PVPush,checkBox_flipY)
 
     def GenerateUI(self):
 
@@ -243,15 +260,19 @@ class CreateLegFromLocatorsUI():
         cmds.separator(height=25, style='out')
 
         # row colum for the extra settings
-        cmds.rowColumnLayout(numberOfColumns=5, columnWidth=[(1, 80), (2, 60), (3, 80), (4, 60), (5,80)])
+        cmds.rowColumnLayout(numberOfColumns=4, columnWidth=[(1, 80), (2, 60), (3, 120), (4, 60)])
 
         cmds.text(label="Name Prefix")
-        self.JointPrefixTextFld = cmds.textField('JointPfxtFld', h=50, w=50)
+        self.JointPrefixTextFld = cmds.textField('JointPfxtFld')
 
         cmds.text(label="Joint Radius")
         self.JointRadiusFloatFld = cmds.floatField('JointRadfFld', minValue=0.01, value=.2, precision=2)
-
-        self.FlipYDirCheckBox = cmds.checkBox('FlipYChckBx', label='Flip Knee Y', align='center' )
+        
+        cmds.text(label="PV Push")
+        self.PVPushFloatFld = cmds.floatField('PVPushfFld', value=5, precision=2)
+        
+        cmds.text(label="Flip Hip/Knee Y")
+        self.FlipYDirCheckBox = cmds.checkBox('FlipYChckBx', label= "",  align='center' )
 
         # escape the settings layout
         cmds.setParent('..')
@@ -265,6 +286,4 @@ class CreateLegFromLocatorsUI():
         # Display the window
         cmds.showWindow(self.win)
                 
-        # Display the window
-        cmds.showWindow(self.win)
                 
