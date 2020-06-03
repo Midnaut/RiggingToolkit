@@ -33,6 +33,20 @@ class LegModule(BaseClassDefs.ModuleBase):
 
         self.OrientAndMatchFootJoints(Prefix);
 
+    def MirrorLegAndFoot(self, Prefix, MirrorPrefix, JointRadius, PVPush):
+        self.FetchLegJointNames(Prefix, "_JNT")
+        self.FetchRevFootJointNames(Prefix, "_JNT")
+        self.FetchPVControlNames(Prefix, "PV_CTL")
+
+        self.MirrorLegChains(Prefix, MirrorPrefix)
+
+        #fetch the new names
+        self.FetchLegJointNames(MirrorPrefix, "_JNT")
+        self.FetchRevFootJointNames(MirrorPrefix, "_JNT")
+        self.FetchPVControlNames(MirrorPrefix, "PV_CTL")
+
+        self.MirrorLegPV(Prefix, MirrorPrefix, JointRadius, PVPush)
+
     def CompleteFootAndNoFlip(self, Prefix, Suffix = "_JNT"):
         #a new instance of the class is generated and we need to re-populate the names
         self.FetchLegJointNames(Prefix, Suffix)
@@ -47,6 +61,20 @@ class LegModule(BaseClassDefs.ModuleBase):
 
         self.CreateNoFlipObjects(Prefix)
         self.ConnectNoFlipControls(Prefix)
+
+    def MirrorFootAndNoFlip(self, Prefix, MirrorPrefix):
+        self.FetchLegJointNames(MirrorPrefix, "_JNT")
+        self.FetchRevFootJointNames(MirrorPrefix, "_JNT")
+
+        self.CreateAndAttachRevFootIK(MirrorPrefix)
+        self.CreateFootControl(MirrorPrefix, mirrored = True, originalPrefix = Prefix)
+        self.CreateRollControl(MirrorPrefix, mirrored = True, originalPrefix = Prefix)
+
+        self.EdgeRollNodes(MirrorPrefix)
+        self.HeelToeNodes(MirrorPrefix)
+
+        self.CreateNoFlipObjects(MirrorPrefix)
+        self.ConnectNoFlipControls(MirrorPrefix)
 
     def CreateLegJoints(self, LocList, Prefix, JointRadius, Suffix = "_JNT"):
         cmds.select(clear=True)
@@ -113,8 +141,16 @@ class LegModule(BaseClassDefs.ModuleBase):
         cmds.select(clear = True)
 
     def CreateLegIK(self, prefix):
-        self.legIKHandle = cmds.ikHandle( n='L_leg_IKH', sj=self.hipJnt, ee=self.ankleJnt, sol = "ikRPsolver")[0]
+        self.legIKHandle = cmds.ikHandle( n=prefix+'leg_IKH', sj=self.hipJnt, ee=self.ankleJnt, sol = "ikRPsolver")[0]
 
+    def MirrorLegChains(self, prefix, mirrorPrefix):
+        cmds.mirrorJoint(self.hipJnt, mirrorBehavior=True, myz=True, searchReplace = [prefix, mirrorPrefix])
+        cmds.mirrorJoint(self.revCBankJnt, mirrorBehavior=True, myz=True, searchReplace = [prefix, mirrorPrefix])
+
+    def FetchPVControlNames(self, prefix, suffix):
+        self.kneePVControl = prefix + self.LEG_JNT_NAMES[1] + suffix
+        self.kneePVOffsetGroup = prefix + self.LEG_JNT_NAMES[1] + "PVOffset_GRP"
+        self.legIKHandle = prefix+'leg_IKH'
 
     def CreatePVControl(self, Prefix, Suffix, PVPush, ControlSize):
         #create polygon at hip knee ankle
@@ -186,6 +222,13 @@ class LegModule(BaseClassDefs.ModuleBase):
         cmds.select(annotation)
         cmds.toggle(template= True)
 
+    def MirrorLegPV(self, prefix, mirrorPrefix, jointRadius, PVPush):
+        self.CreatePVControl(mirrorPrefix, "PV_CTL", PVPush, jointRadius)
+        #invert the x axis of the pole vector to mirror behavior
+        cmds.select(self.kneePVOffsetGroup)
+        cmds.xform(s= [-1, 1, 1])
+
+
     def FetchRevFootJointNames(self, prefix, suffix):
         self.revCBankJnt = prefix + self.RVF_JNT_NAMES[0] + suffix
         self.revEBankJnt = prefix + self.RVF_JNT_NAMES[1] + suffix
@@ -228,34 +271,54 @@ class LegModule(BaseClassDefs.ModuleBase):
 
     def CreateAndAttachRevFootIK(self, prefix):
         #ik rotate plane solver
-        self.ankleIKHandle = cmds.ikHandle( n='L_ankle_IKH', sj=self.ankleJnt, ee=self.ballJnt, sol = "ikRPsolver")[0]
-        self.ballIKHandle = cmds.ikHandle( n='L_ball_IKH', sj=self.ballJnt, ee=self.toeJnt, sol = "ikRPsolver")[0]
+        self.ankleIKHandle = cmds.ikHandle( n=prefix+'ankle_IKH', sj=self.ankleJnt, ee=self.ballJnt, sol = "ikRPsolver")[0]
+        self.ballIKHandle = cmds.ikHandle( n=prefix+'ball_IKH', sj=self.ballJnt, ee=self.toeJnt, sol = "ikRPsolver")[0]
 
         cmds.parent(self.ankleIKHandle, self.revBallJnt)
         cmds.parent(self.ballIKHandle, self.revToeJnt)
 
         cmds.select(clear = True)
 
-    def CreateFootControl(self, prefix):
+    def CreateFootControl(self, prefix, mirrored = False, originalPrefix = ""):
+
+        targetBall = self.ballJnt
+        if mirrored:
+            targetBall = originalPrefix + self.LEG_JNT_NAMES[3] + "_JNT"
+
         #create circle on the ball joint, normal as x+ of the joint
         #scale the control as a base to cover ball to toe 
         shapeScale =cmds.xform(self.toeJnt,q=1,ws=0,t=1)[0]
-
         shape = cmds.circle(constructionHistory = False, object = True, normal= [0,0,1], radius = shapeScale)[0]
+
         control = cmds.rename(shape, prefix + "foot"+ "_CTL")
         offGrp = cmds.group(control,n=(prefix + "footCTL" + "Offset_GRP"))
-        parCon = cmds.parentConstraint(self.ballJnt, offGrp, mo= 0)
+        parCon = cmds.parentConstraint(targetBall, offGrp, mo= 0)
         cmds.delete(parCon)
+
+        if mirrored:
+            tempGrp = cmds.group(em=True, n="tempFlipFoot")
+            cmds.parent(offGrp, tempGrp)
+            cmds.xform(tempGrp, s= [-1, 1, 1])
+            cmds.parent(offGrp, world = True)
+            cmds.delete(tempGrp)
 
         #cleanup
         cmds.parent(prefix + "leg_IKH", self.revAnkleJnt)
         cmds.parent(self.revCBankJnt, control)
+
         self.footControl = control
+        self.footControlOffsetGrp = offGrp
+
         cmds.select(clear = True)
 
-    def CreateRollControl(self, prefix):
+    def CreateRollControl(self, prefix, mirrored = False, originalPrefix = ""):
+
+        pivotTarget = self.revPivotJnt
+        if mirrored:
+            pivotTarget = originalPrefix + self.RVF_JNT_NAMES[2] + "_JNT"
+
         #create rotator control, scale = edge to pivot distance
-        shapeScale =cmds.xform(self.revPivotJnt,q=1,ws=0,t=1)[1]
+        shapeScale =cmds.xform(pivotTarget,q=1,ws=0,t=1)[1]
         shapeScale = abs(shapeScale)
         shape = ShapeUtils.sphereControl()
 
@@ -263,21 +326,37 @@ class LegModule(BaseClassDefs.ModuleBase):
 
         control = cmds.rename(shape, prefix+"footRoll" +"_CTL")
         offGrp = cmds.group(control, n=prefix+ "footRollCTL" +"Offset_GRP")
-        orientCon = cmds.orientConstraint(self.revPivotJnt, offGrp, offset = [90,0,90])
+        orientCon = cmds.orientConstraint(pivotTarget, offGrp, offset = [90,0,90])
         cmds.delete(orientCon)
 
         #position 3 x scale away from ball joint
-        cmds.parent(offGrp, self.revPivotJnt)
+        cmds.parent(offGrp, pivotTarget)
         # places it neat off to the side and a little above the ground of the ball of the foot
         cmds.xform(offGrp ,translation = [0,3*shapeScale,shapeScale], worldSpace = False, absolute = True)
+        
         cmds.parent(offGrp, world = True)
 
         #cleanup
         cmds.select(control)
         cmds.makeIdentity(apply=True, t=1, r=1, s=1, n=0)
         cmds.select(clear = True)
+
+        if mirrored:
+            tempGrp = cmds.group(em=True, n="tempFlipFoot")
+            cmds.parent(offGrp, tempGrp)
+            cmds.xform(tempGrp, s= [-1, 1, 1])
+            cmds.parent(offGrp, world = True)
+            cmds.delete(tempGrp)
+
         self.rollControlOffsetGroup = offGrp
         self.rollControl = control
+
+    def MirrorNoFlipControls(self):
+        #invert the x axis of the pole vector to mirror behavior
+        cmds.select(self.footControlOffsetGrp)
+        cmds.xform(s= [-1, 1, 1])
+        cmds.select(self.rollControlOffsetGroup)
+        cmds.xform(s= [-1, 1, 1])
 
     def EdgeRollNodes(self, prefix):
         #condition node for bank joints
@@ -438,12 +517,23 @@ class CreateLegFromLocatorsUI():
         checkBox_flipY = cmds.checkBox('FlipYChckBx' , query=True, value=True)
         LegModule().CreateLegAndFoot(locList,textField_JointPrefix,floatField_JointRad,floatField_PVPush,checkBox_flipY)
 
+    def MirrorStart(self, *args):
+        textField_JointPrefix = cmds.textField('JointPfxtFld', query=True, text=True)
+        textField_JointMirrorPrefix = cmds.textField('JointMirrorPfxtFld', query=True, text=True)
+        floatField_JointRad = cmds.floatField('JointRadfFld', query=True, value=True)
+        floatField_PVPush = cmds.floatField('PVPushfFld', query=True, value=True)
+        LegModule().MirrorLegAndFoot(textField_JointPrefix, textField_JointMirrorPrefix,floatField_JointRad,floatField_PVPush)
+
     def FinishModule(self, *args):
         textField_JointPrefix = cmds.textField('JointPfxtFld', query=True, text=True)
         LegModule().CompleteFootAndNoFlip(textField_JointPrefix)
 
-    def GenerateUI(self):
+    def MirrorFinish(self, *args):
+        textField_JointPrefix = cmds.textField('JointPfxtFld', query=True, text=True)
+        textField_JointMirrorPrefix = cmds.textField('JointMirrorPfxtFld', query=True, text=True)
+        LegModule().MirrorFootAndNoFlip(textField_JointPrefix, textField_JointMirrorPrefix)
 
+    def GenerateUI(self):
         # Define an id string for the window first
         self.windowName = "Leg Module Generator v0.2"
         # define out own window ID with no special characters
@@ -507,13 +597,21 @@ class CreateLegFromLocatorsUI():
 
         # row colum for the extra settings
         cmds.rowColumnLayout(numberOfColumns=4, columnWidth=[(1, 80), (2, 60), (3, 120), (4, 60)])
+        #row 1
+        cmds.text(label="Base Prefix")
+        self.JointPrefixTextFld = cmds.textField('JointPfxtFld',text="L_")
 
-        cmds.text(label="Name Prefix")
-        self.JointPrefixTextFld = cmds.textField('JointPfxtFld',value="L_",)
+        cmds.text(label="Mirror Prefix")
+        self.JointMirrorPrefixTextFld = cmds.textField('JointMirrorPfxtFld',text="R_")
 
+        #row 2
         cmds.text(label="Joint Radius")
         self.JointRadiusFloatFld = cmds.floatField('JointRadfFld', minValue=0.01, value=.2, precision=2)
-        
+
+        cmds.text(label="")
+        cmds.text(label="")
+
+        #row 3
         cmds.text(label="PV Push")
         self.PVPushFloatFld = cmds.floatField('PVPushfFld', value=5, precision=2)
 
@@ -527,13 +625,15 @@ class CreateLegFromLocatorsUI():
         cmds.text(label="Warning! Make sure you double check the hip/knee orients!")
         
         cmds.separator(height=25, style='out')
-        self.GenerateButton = cmds.button(l='Generate Leg + Foot Control Bones', c=self.StartModule, h=50, width=200)
+        self.GenerateButton = cmds.button(l='Generate Leg + Foot Control Bones', c=self.StartModule, width=200)
+        self.MirrorGenerateButton = cmds.button(l='Mirror Generate (yz plane)', c=self.MirrorStart, width=200)
         
         cmds.separator(height=25, style='out')
         
         cmds.text(label="Warning! Make sure you have placed the Reverse Foot joints!")
         
         cmds.separator(height=25, style='out')
-        self.FinishButton = cmds.button(l='Complete foot control + No flip Leg', c=self.FinishModule, h=50, width=200)
+        self.FinishButton = cmds.button(l='Complete foot control + No flip Leg', c=self.FinishModule, width=200)
+        self.MirrorFinishButton = cmds.button(l='Mirror the foot across', c=self.MirrorFinish, width=200)
         # Display the window
         cmds.showWindow(self.win)           
